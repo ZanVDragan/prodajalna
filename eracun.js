@@ -47,28 +47,33 @@ function davcnaStopnja(izvajalec, zanr) {
 
 // Prikaz seznama pesmi na strani
 streznik.get('/', function(zahteva, odgovor) {
-  pb.all("SELECT Track.TrackId AS id, Track.Name AS pesem, \
-          Artist.Name AS izvajalec, Track.UnitPrice * " +
-          razmerje_usd_eur + " AS cena, \
-          COUNT(InvoiceLine.InvoiceId) AS steviloProdaj, \
-          Genre.Name AS zanr \
-          FROM Track, Album, Artist, InvoiceLine, Genre \
-          WHERE Track.AlbumId = Album.AlbumId AND \
-          Artist.ArtistId = Album.ArtistId AND \
-          InvoiceLine.TrackId = Track.TrackId AND \
-          Track.GenreId = Genre.GenreId \
-          GROUP BY Track.TrackId \
-          ORDER BY steviloProdaj DESC, pesem ASC \
-          LIMIT 100", function(napaka, vrstice) {
-    if (napaka)
-      odgovor.sendStatus(500);
-    else {
-        for (var i=0; i<vrstice.length; i++)
-          vrstice[i].stopnja = davcnaStopnja(vrstice[i].izvajalec, vrstice[i].zanr);
-        odgovor.render('seznam', {seznamPesmi: vrstice});
-      }
-  })
-})
+  // Check if customer is in fact logged in.
+  if (!zahteva.session.customer) {
+    odgovor.redirect("/prijava");
+  } else {
+    pb.all("SELECT Track.TrackId AS id, Track.Name AS pesem, \
+            Artist.Name AS izvajalec, Track.UnitPrice * " +
+            razmerje_usd_eur + " AS cena, \
+            COUNT(InvoiceLine.InvoiceId) AS steviloProdaj, \
+            Genre.Name AS zanr \
+            FROM Track, Album, Artist, InvoiceLine, Genre \
+            WHERE Track.AlbumId = Album.AlbumId AND \
+            Artist.ArtistId = Album.ArtistId AND \
+            InvoiceLine.TrackId = Track.TrackId AND \
+            Track.GenreId = Genre.GenreId \
+            GROUP BY Track.TrackId \
+            ORDER BY steviloProdaj DESC, pesem ASC \
+            LIMIT 100", function(napaka, vrstice) {
+      if (napaka)
+        odgovor.sendStatus(500);
+      else {
+          for (var i=0; i<vrstice.length; i++)
+            vrstice[i].stopnja = davcnaStopnja(vrstice[i].izvajalec, vrstice[i].zanr);
+          odgovor.render('seznam', {seznamPesmi: vrstice});
+        }
+    });
+  }
+});
 
 // Dodajanje oz. brisanje pesmi iz košarice
 streznik.get('/kosarica/:idPesmi', function(zahteva, odgovor) {
@@ -133,23 +138,88 @@ var pesmiIzRacuna = function(racunId, callback) {
     Track.TrackId IN (SELECT InvoiceLine.TrackId FROM InvoiceLine, Invoice \
     WHERE InvoiceLine.InvoiceId = Invoice.InvoiceId AND Invoice.InvoiceId = " + racunId + ")",
     function(napaka, vrstice) {
-      console.log(vrstice);
-    })
-}
+      callback(napaka, vrstice);
+    });
+};
 
 // Vrni podrobnosti o stranki iz računa
 var strankaIzRacuna = function(racunId, callback) {
     pb.all("SELECT Customer.* FROM Customer, Invoice \
             WHERE Customer.CustomerId = Invoice.CustomerId AND Invoice.InvoiceId = " + racunId,
     function(napaka, vrstice) {
-      console.log(vrstice);
-    })
-}
+      callback(napaka, vrstice);
+    });
+};
+
+// Render receipt for the customer.
+var receiptRender = function(request, response, songs) {
+  var form = new formidable.IncomingForm();
+  
+  form.parse(request, function(error, fields, files) {
+    error = false;
+    try {
+      // Check if there has been a request fo showing receipt from database.
+      if (songs == null) {
+        var recId = fields.seznamRacunov;
+        // Retrieve customer.
+        strankaIzRacuna(recId, function(error1, customer) {
+          // Retireve songs.
+          songs = pesmiIzRacuna(recId, function(error2, songs) {
+            // Check for errors.
+            if (error1 == null && error2 == null) {
+              // Build query response.
+              response.setHeader("content-type", "text/xml");
+              response.render("eslog", {
+                vizualiziraj: true,
+                customer: customer[0],
+                postavkeRacuna: songs,
+              });
+            } else {
+              error = true;
+            }
+          });
+        });
+      } else {
+        // Customer wants and actual receipt for their purchase.
+        // Build query response.
+        response.setHeader("content-type", "text/xml");
+        response.render("eslog", {
+          vizualiziraj: request.params.oblika == "html" ? true : false,
+          customer: request.session.customer,
+          postavkeRacuna: songs,
+        });
+      }
+    } catch (err) {
+      error = true;
+      console.log(err);
+    }
+    // Check for error.
+    if (error) {
+      // Check if existing receipt is requested.
+      if (songs == null) {
+        vrniStranke(function(napaka1, customerList) {
+          vrniRacune(function(napaka2, receiptList) {
+            response.render('prijava',
+                           {sporocilo: "Prišlo je do napake pri prikazu računa. \
+                                        Prosimo poizkusite znova.",
+                            seznamStrank: customerList,
+                            seznamRacunov: receiptList}
+                          );  
+          });
+        });
+      } else {
+        // Customer wants and actual receipt for their purchase.
+        response.send("<p>Prišlo je do napake pri prikazu računa. \
+                        Prosimo, poizkusite znova.</p>");
+      }
+    }
+  });
+};
 
 // Izpis računa v HTML predstavitvi na podlagi podatkov iz baze
 streznik.post('/izpisiRacunBaza', function(zahteva, odgovor) {
-  odgovor.end();
-})
+  receiptRender(zahteva, odgovor, null);
+});
 
 // Izpis računa v HTML predstavitvi ali izvorni XML obliki
 streznik.get('/izpisiRacun/:oblika', function(zahteva, odgovor) {
@@ -160,14 +230,10 @@ streznik.get('/izpisiRacun/:oblika', function(zahteva, odgovor) {
       odgovor.send("<p>V košarici nimate nobene pesmi, \
         zato računa ni mogoče pripraviti!</p>");
     } else {
-      odgovor.setHeader('content-type', 'text/xml');
-      odgovor.render('eslog', {
-        vizualiziraj: zahteva.params.oblika == 'html' ? true : false,
-        postavkeRacuna: pesmi
-      })  
+      receiptRender(zahteva, odgovor, pesmi);
     }
-  })
-})
+  });
+});
 
 // Privzeto izpiši račun v HTML obliki
 streznik.get('/izpisiRacun', function(zahteva, odgovor) {
@@ -199,8 +265,8 @@ var vrniRacune = function(callback) {
 streznik.post('/prijava', function(zahteva, odgovor) {
   var form = new formidable.IncomingForm();
   
-  form.parse(zahteva, function (napaka1, polja, datoteke) {
-    var napaka2 = false;
+  form.parse(zahteva, function (error, polja, datoteke) {
+    error = false;
     try {
       var stmt = pb.prepare("\
         INSERT INTO Customer \
@@ -209,15 +275,40 @@ streznik.post('/prijava', function(zahteva, odgovor) {
     	  Phone, Fax, Email, SupportRepId) \
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)");
       //TODO: add fields and finalize
-      //stmt.run("", "", "", "", "", "", "", "", "", "", "", 3); 
-      //stmt.finalize();
+      stmt.run(polja.FirstName, polja.LastName, polja.Company, polja.Address, polja.City, polja.State,
+        polja.Country, polja.PostalCode, polja.Phone, polja.Fax, polja.Email, 3); 
+      stmt.finalize();
     } catch (err) {
-      napaka2 = true;
+      error = true;
     }
-  
-    odgovor.end();
+    // Check for error.
+    if (!error) {
+      // Let the user know about success of registration.
+      vrniStranke(function(error1, stranke) {
+        vrniRacune(function(error2, racuni) {
+          // Render response.
+          odgovor.render("prijava",
+                         {sporocilo: "Stranka je bila uspešno registrirana.",
+                          seznamStrank: stranke,
+                          seznamRacunov: racuni}
+                        );
+        });
+      });
+    } else {
+      // Let the user know about error during registration.
+      vrniStranke(function(error1, stranke) {
+        vrniRacune(function(error2, racuni) {
+          odgovor.render("prijava",
+                         {sporocilo: "Prišlo je do napake pri registraciji nove stranke. \
+                                      Prosim preverite vnešene podatke in poskusite znova.",
+                          seznamStrank: stranke,
+                          seznamRacunov: racuni}
+                        );
+        });
+      });
+    }
   });
-})
+});
 
 // Prikaz strani za prijavo
 streznik.get('/prijava', function(zahteva, odgovor) {
@@ -233,16 +324,48 @@ streznik.post('/stranka', function(zahteva, odgovor) {
   var form = new formidable.IncomingForm();
   
   form.parse(zahteva, function (napaka1, polja, datoteke) {
-    odgovor.redirect('/')
+    napaka1 = false;
+    // Log in request.
+    try {
+      // Retrieve customer information.
+      pb.all("SELECT FirstName, LastName, Company, \
+    	  Address, City, State, Country, PostalCode, \
+    	  Phone, Fax, Email, SupportRepId \
+    	  FROM Customer \
+    	  WHERE Customer.CustomerId == " + polja.seznamStrank,
+    	  function(napaka2, vrstice) {
+    	    // Check if entry found.
+    	    if (vrstice.length > 0) {
+    	      // Add customer to session.
+    	      zahteva.session.customer = vrstice[0];
+    	    } else {
+    	      // No customer with given ID has been found.
+    	      napaka1 = true;
+    	    }
+    	    odgovor.redirect("/");
+    	  });
+    } catch (err) {
+      napaka1 = true;
+    }
+    if (napaka1) {
+      vrniStranke(function(napaka1, stranke) {
+        vrniRacune(function(napaka2, racuni) {
+          odgovor.render('prijava',
+                         {sporocilo: "Napaka pri prijavi. Prosimo poizkusite znova.",
+                          seznamStrank: stranke,
+                          seznamRacunov: racuni}
+                        );  
+        });
+      });
+    }
   });
-})
+});
 
 // Odjava stranke
 streznik.post('/odjava', function(zahteva, odgovor) {
-    odgovor.redirect('/prijava') 
-})
-
-
+    zahteva.session.customer = null;
+    odgovor.redirect('/prijava');
+});
 
 streznik.listen(process.env.PORT, function() {
   console.log("Strežnik pognan!");
