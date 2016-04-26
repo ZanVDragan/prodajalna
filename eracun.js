@@ -133,23 +133,69 @@ var pesmiIzRacuna = function(racunId, callback) {
     Track.TrackId IN (SELECT InvoiceLine.TrackId FROM InvoiceLine, Invoice \
     WHERE InvoiceLine.InvoiceId = Invoice.InvoiceId AND Invoice.InvoiceId = " + racunId + ")",
     function(napaka, vrstice) {
-      console.log(vrstice);
-    })
-}
+      callback(napaka, vrstice);
+    });
+};
 
 // Vrni podrobnosti o stranki iz računa
 var strankaIzRacuna = function(racunId, callback) {
     pb.all("SELECT Customer.* FROM Customer, Invoice \
             WHERE Customer.CustomerId = Invoice.CustomerId AND Invoice.InvoiceId = " + racunId,
     function(napaka, vrstice) {
-      console.log(vrstice);
-    })
-}
+      callback(napaka, vrstice);
+    });
+};
+
+// Render receipt for the customer.
+var receiptRender = function(request, response, songs) {
+  var form = new formidable.IncomingForm();
+  
+  form.parse(request, function(error, fields, files) {
+    error = false;
+    try {
+        var recId = fields.seznamRacunov;
+        // Retrieve customer.
+        strankaIzRacuna(recId, function(error1, customer) {
+          // Retireve songs.
+          songs = pesmiIzRacuna(recId, function(error2, songs) {
+            // Check for errors.
+            if (error1 == null && error2 == null) {
+              // Build query response.
+              response.setHeader("content-type", "text/xml");
+              response.render("eslog", {
+                vizualiziraj: true,
+                customer: customer[0],
+                postavkeRacuna: songs,
+              });
+            } else {
+              error = true;
+            }
+          });
+        });
+    } catch (err) {
+      error = true;
+      console.log(err);
+    }
+    // Check for error.
+    if (error) {
+      vrniStranke(function(napaka1, customerList) {
+        vrniRacune(function(napaka2, receiptList) {
+          response.render('prijava',
+                         {sporocilo: "Prišlo je do napake pri prikazu računa. \
+                                      Prosimo poizkusite znova.",
+                          seznamStrank: customerList,
+                          seznamRacunov: receiptList}
+                        );  
+        });
+      });
+    }
+  });
+};
 
 // Izpis računa v HTML predstavitvi na podlagi podatkov iz baze
 streznik.post('/izpisiRacunBaza', function(zahteva, odgovor) {
-  odgovor.end();
-})
+  receiptRender(zahteva, odgovor, null);
+});
 
 // Izpis računa v HTML predstavitvi ali izvorni XML obliki
 streznik.get('/izpisiRacun/:oblika', function(zahteva, odgovor) {
